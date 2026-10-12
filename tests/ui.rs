@@ -135,3 +135,37 @@ fn generated_table_at_sample_limit_can_be_saved() {
     );
     assert!(Document::decode(&serde_json::to_string(&app.document).unwrap()).is_ok());
 }
+
+#[test]
+fn sinusoidal_regression_predicts_training_data_in_degree_mode() {
+    use rust_graph::{graph::PlotKind, math::Env, regression::RegressionModel};
+    let mut table = Row::expression("", 0);
+    table.kind = "table".into();
+    let points: Vec<_> = (0..41)
+        .map(|i| {
+            let x = i as f64 * 0.2;
+            [x, 2.0 + 3.0 * (1.7 * x + 0.4).sin()]
+        })
+        .collect();
+    table.table = points
+        .iter()
+        .map(|[x, y]| format!("{x:.17},{y:.17}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut app = GraphApp::from_document(Document {
+        rows: vec![table],
+        degrees: true,
+        ..Default::default()
+    });
+    app.fit_table(0, RegressionModel::Sinusoidal).unwrap();
+    let scene = app.document.compile();
+    assert!(scene.errors.iter().all(Option::is_none));
+    let PlotKind::Y(expr) = &scene.plots[1].kind else {
+        panic!("fit must graph as y(x)")
+    };
+    let mut env: Env = scene.env.clone();
+    for [x, y] in points {
+        env.vars.insert("x".into(), x);
+        assert!((expr.eval(&env).unwrap() - y).abs() < 1e-7);
+    }
+}

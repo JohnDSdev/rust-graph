@@ -27,10 +27,10 @@
 - Existing files deserialize with defaults for new settings.
 
 ### Task 1: Independent numerical modules
-- [ ] Write failing tests, implement, and verify each assigned module in isolated /tmp test manifests.
+- [x] Write failing tests, implement, and verify each assigned module in isolated /tmp test manifests.
 ### Task 2: Notation and UI
-- [ ] Write failing LaTeX parsing/presentation and UI/serialization tests.
-- [ ] Implement native math layout, persisted display/marker settings, feature inspector, regression selector and table-generation dialog.
+- [x] Write failing LaTeX parsing/presentation and UI/serialization tests.
+- [x] Implement native math layout, persisted display/marker settings, feature inspector, regression selector and table-generation dialog.
 ### Task 3: Validate and deliver
 - [ ] Run complete tests, fmt, clippy and release build; visually verify native UI and font symbols.
 - [ ] Review module integration, update docs, install new binary, push repository and verify CI.
