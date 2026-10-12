@@ -1,0 +1,29 @@
+[package]
+name = "rust-graph"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "An offline native Linux graphing calculator"
+license = "MIT"
+repository = "https://github.com/JohnDSdev/rust-graph"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+lto = "thin"
+strip = true
+
+[dependencies.eframe]
+version = "0.33"
+default-features = false
+features = ["default_fonts", "glow", "wayland", "x11"]
+
+[dependencies.rfd]
+version = "0.15"
+
+[dependencies.resvg]
+version = "0.45"
+default-features = false
+features = ["text", "system-fonts"]
