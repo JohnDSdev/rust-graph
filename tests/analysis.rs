@@ -170,3 +170,34 @@ fn implicit_solver_is_scale_invariant_and_rejects_coincidence() {
         }
     }
 }
+
+#[test]
+fn intercepts_preserve_exact_zero_without_rounding_small_values() {
+    let view = Viewport {
+        xmin: -1.73,
+        xmax: 2.31,
+        ymin: -1.2,
+        ymax: 1.3,
+        ..Default::default()
+    };
+    for (text, expected_y) in [("y=sin(x)", 0.0), ("y=1e-21+x", 1e-21)] {
+        let doc = Document {
+            rows: vec![Row::expression(text, 0)],
+            ..Default::default()
+        };
+        let scene = doc.compile();
+        let points = features(&scene, view, &scene.geometry(view, 600, 400));
+        let intercept = points
+            .iter()
+            .find(|p| p.kind == FeatureKind::YIntercept)
+            .unwrap();
+        assert_eq!(intercept.position, [0.0, expected_y]);
+        if expected_y == 0.0 {
+            let x = points
+                .iter()
+                .find(|p| p.kind == FeatureKind::XIntercept)
+                .unwrap();
+            assert_eq!(x.position, [0.0, 0.0]);
+        }
+    }
+}

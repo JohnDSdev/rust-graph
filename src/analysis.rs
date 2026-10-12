@@ -79,6 +79,12 @@ fn roots(f: &impl Fn(f64) -> Option<f64>, a: f64, b: f64) -> Vec<f64> {
         }
         if fa.signum() != fb.signum() {
             let (mut lo, mut hi, mut fl) = (a + h * i as f64, a + h * (i + 1) as f64, fa);
+            // Preserve a directly verified zero inside this bracket, rather
+            // than introducing floating-point residue through refinement.
+            if lo <= 0.0 && hi >= 0.0 && f(0.0) == Some(0.0) {
+                out.push(0.0);
+                continue;
+            }
             for _ in 0..60 {
                 let m = (lo + hi) / 2.;
                 let Some(fm) = f(m) else { break };
@@ -107,6 +113,10 @@ fn roots(f: &impl Fn(f64) -> Option<f64>, a: f64, b: f64) -> Vec<f64> {
         };
         if c.abs() < l.abs() && c.abs() < r.abs() {
             let (mut lo, mut hi) = (a + h * (i - 1) as f64, a + h * (i + 1) as f64);
+            if lo <= 0.0 && hi >= 0.0 && f(0.0) == Some(0.0) {
+                out.push(0.0);
+                continue;
+            }
             for _ in 0..64 {
                 let x = lo + (hi - lo) / 3.;
                 let y = hi - (hi - lo) / 3.;
