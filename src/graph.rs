@@ -369,7 +369,7 @@ fn implicit(
                     }
                 }
             }
-            for pair in crossings.chunks_exact(2) {
+            for pair in crossings.as_chunks::<2>().0 {
                 out.lines.push((plot.color, pair.to_vec()));
             }
         }

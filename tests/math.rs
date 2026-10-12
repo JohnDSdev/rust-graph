@@ -102,3 +102,24 @@ fn expanding_function_dependencies_validate_without_expansion() {
     assert!(expr.validate(&e, &BTreeSet::new()).is_ok());
     assert!(expr.eval(&e).is_err());
 }
+
+#[test]
+fn latex_radicals_fractions_and_exponents() {
+    assert!((eval(r"\frac{\sqrt{8}}{2}") - 2.0_f64.sqrt()).abs() < 1e-12);
+    assert_eq!(eval(r"2^{3}+\sqrt[3]{27}"), 11.0);
+    assert!((eval(r"\sin\left(\frac{\pi}{2}\right)") - 1.0).abs() < 1e-12);
+    assert_eq!(eval("√(9)+π-π"), 3.0);
+}
+#[test]
+fn invalid_latex_is_a_visible_parse_error() {
+    for s in [r"\frac{1}", r"\sqrt{", r"\unknown{2}", r"x^{2"] {
+        assert!(Expr::parse(s).is_err(), "{s}");
+    }
+}
+
+#[test]
+fn scientific_notation_accepts_unsigned_exponents() {
+    assert_eq!(eval("1e3"), 1000.0);
+    assert_eq!(eval("1E-3"), 0.001);
+    assert!((eval("2e") - 2.0 * std::f64::consts::E).abs() < 1e-12);
+}

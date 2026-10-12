@@ -1,8 +1,12 @@
 //! Native desktop interaction and local file workflows.
 use crate::{
-    document::{Document, Row, linear_fit, parameter, table_points, valid_range},
-    export,
+    analysis::{self, FeatureKind, FeaturePoint},
+    document::{Document, Row, parameter, table_points, valid_range},
+    exact, export,
     graph::{COLORS, Geometry, Scene, Viewport, format_number, grid_step},
+    math::Expr,
+    regression::{self, RegressionModel},
+    typeset,
 };
 use eframe::egui::{
     self, Align, Color32, FontId, Id, Key, Layout, Pos2, Rect, RichText, Sense, Stroke, Vec2,
@@ -39,6 +43,17 @@ pub struct GraphApp {
     autosave: Option<PathBuf>,
     last_autosave: Instant,
     last_tick: Instant,
+    styled: bool,
+    feature_points: Vec<FeaturePoint>,
+    feature_view: Option<(Viewport, usize, usize)>,
+    feature_changed: Instant,
+    feature_updated: Instant,
+    point_inspector: bool,
+    selected_point: Option<FeaturePoint>,
+    table_dialog: Option<usize>,
+    table_start: f64,
+    table_end: f64,
+    table_step: f64,
 }
 impl Default for GraphApp {
     fn default() -> Self {
@@ -64,10 +79,86 @@ impl Default for GraphApp {
             autosave: None,
             last_autosave: Instant::now(),
             last_tick: Instant::now(),
+            styled: false,
+            feature_points: Vec::new(),
+            feature_view: None,
+            feature_changed: Instant::now(),
+            feature_updated: Instant::now(),
+            point_inspector: false,
+            selected_point: None,
+            table_dialog: None,
+            table_start: -5.0,
+            table_end: 5.0,
+            table_step: 1.0,
         }
     }
 }
 impl GraphApp {
+    pub fn fit_table(&mut self, index: usize, model: RegressionModel) -> Result<(), String> {
+        if self.document.rows.len() >= 128 {
+            return Err("A graph can contain at most 128 rows".into());
+        }
+        let source = self
+            .document
+            .rows
+            .get(index)
+            .ok_or("Table no longer exists")?;
+        if source.kind != "table" {
+            return Err("Choose a table row".into());
+        }
+        let points = table_points(&source.table)?;
+        let fit = regression::fit(&points, model)?;
+        let mut row = Row::expression(&fit.equation, source.color);
+        if self.document.degrees && model == RegressionModel::Sinusoidal {
+            row.text = row
+                .text
+                .replace("sin(", "sin(180/pi*")
+                .replace("cos(", "cos(180/pi*");
+        }
+        row.annotation = format!(
+            "{} regression · R² = {} · RMSE = {}",
+            model.label(),
+            exact::decimal(fit.r_squared),
+            exact::decimal(fit.rmse)
+        );
+        self.status = row.annotation.clone();
+        self.document.rows.push(row);
+        self.recompile();
+        Ok(())
+    }
+    pub fn generate_from_row(
+        &mut self,
+        index: usize,
+        start: f64,
+        end: f64,
+        step: f64,
+    ) -> Result<(), String> {
+        if self.document.rows.len() >= 128 {
+            return Err("A graph can contain at most 128 rows".into());
+        }
+        let source = self
+            .document
+            .rows
+            .get(index)
+            .ok_or("Expression no longer exists")?;
+        let mut visible = self.document.clone();
+        visible.rows[index].visible = true;
+        let data = regression::generate_table(&visible.compile(), index, start, end, step)?;
+        let mut row = Row::expression("", source.color);
+        row.kind = "table".into();
+        row.table = data;
+        row.annotation = format!(
+            "Generated from expression {} · {} to {} by {}",
+            index + 1,
+            exact::decimal(start),
+            exact::decimal(end),
+            exact::decimal(step)
+        );
+        self.document.rows.push(row);
+        self.status = "Generated table with full-precision values".into();
+        self.recompile();
+        Ok(())
+    }
     pub fn from_document(document: Document) -> Self {
         let mut app = Self {
             document,
@@ -102,14 +193,33 @@ impl GraphApp {
     }
     pub fn style(ctx: &egui::Context) {
         ctx.set_visuals(egui::Visuals::light());
+        let mut fonts = egui::FontDefinitions::default();
+        fonts.font_data.insert(
+            "STIX Two Math".into(),
+            std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
+                "../assets/STIXTwoMath-Regular.ttf"
+            ))),
+        );
+        fonts.families.insert(
+            egui::FontFamily::Name("math".into()),
+            vec!["STIX Two Math".into()],
+        );
+        for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+            fonts
+                .families
+                .entry(family)
+                .or_default()
+                .push("STIX Two Math".into());
+        }
+        ctx.set_fonts(fonts);
         let mut style = (*ctx.style()).clone();
         style.spacing.item_spacing = Vec2::new(8.0, 8.0);
         style.spacing.button_padding = Vec2::new(10.0, 7.0);
         style.visuals.selection.bg_fill = GREEN.gamma_multiply(0.22);
-        style.visuals.selection.stroke = Stroke::new(1.0, GREEN);
+        style.visuals.selection.stroke = Stroke::new(1.0_f32, GREEN);
         style.visuals.widgets.active.bg_fill = Color32::from_rgb(224, 239, 231);
         style.visuals.widgets.hovered.bg_fill = Color32::from_rgb(235, 240, 237);
-        style.visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, INK);
+        style.visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, INK);
         style
             .text_styles
             .insert(egui::TextStyle::Body, FontId::proportional(14.0));
@@ -127,6 +237,10 @@ impl GraphApp {
     fn recompile(&mut self) {
         self.scene = self.document.compile();
         self.cache_view = None;
+        self.feature_view = None;
+        self.feature_points.clear();
+        self.selected_point = None;
+        self.feature_changed = Instant::now();
     }
     pub fn undo(&mut self) {
         if let Some(d) = self.history.pop() {
@@ -150,12 +264,17 @@ impl GraphApp {
             return;
         }
         if serde_json::to_string(&before).unwrap_or_default() != self.snapshot() {
+            let math_changed = before.degrees != self.document.degrees
+                || serde_json::to_string(&before.rows).unwrap_or_default()
+                    != serde_json::to_string(&self.document.rows).unwrap_or_default();
             self.history.push(before);
             if self.history.len() > 100 {
                 self.history.remove(0);
             }
             self.future.clear();
-            self.recompile();
+            if math_changed {
+                self.recompile();
+            }
         }
     }
     fn add_row(&mut self, kind: &str) {
@@ -307,6 +426,10 @@ impl GraphApp {
         }
     }
     pub fn ui(&mut self, ctx: &egui::Context) {
+        if !self.styled {
+            Self::style(ctx);
+            self.styled = true;
+        }
         self.animate(ctx);
         let before = self.document.clone();
         self.shortcuts(ctx);
@@ -319,6 +442,12 @@ impl GraphApp {
         }
         if self.help {
             self.help_window(ctx);
+        }
+        if self.point_inspector {
+            self.points_window(ctx);
+        }
+        if self.table_dialog.is_some() {
+            self.table_window(ctx);
         }
         self.remember(before);
         if self.last_autosave.elapsed() > Duration::from_secs(3) {
@@ -351,7 +480,7 @@ impl GraphApp {
                 ] {
                     widgets.bg_fill = Color32::from_rgb(53, 64, 69);
                     widgets.weak_bg_fill = Color32::from_rgb(53, 64, 69);
-                    widgets.fg_stroke = Stroke::new(1.0, Color32::WHITE);
+                    widgets.fg_stroke = Stroke::new(1.0_f32, Color32::WHITE);
                 }
                 ui.horizontal_centered(|ui| {
                     brand_icon(ui);
@@ -494,6 +623,9 @@ impl GraphApp {
                     self.keypad_ui(ui);
                     ui.add_space(8.0);
                 }
+                let pretty_math = self.document.pretty_math;
+                let exact_values = self.document.exact_values;
+                let mut table_source = None;
                 let mut remove = None;
                 let mut insert = None;
                 let mut fit = None;
@@ -508,7 +640,7 @@ impl GraphApp {
                             let frame = egui::Frame::new()
                                 .fill(Color32::WHITE)
                                 .stroke(Stroke::new(
-                                    1.0,
+                                    1.0_f32,
                                     if error.is_some() {
                                         Color32::from_rgb(232, 182, 182)
                                     } else {
@@ -559,6 +691,12 @@ impl GraphApp {
                                                         move_row = Some((i, i + 1));
                                                         ui.close();
                                                     }
+                                                    if row.kind == "expression"
+                                                        && ui.button("Generate table…").clicked()
+                                                    {
+                                                        table_source = Some(i);
+                                                        ui.close();
+                                                    }
                                                     if ui.button("Duplicate").clicked() {
                                                         insert = Some(i);
                                                         ui.close();
@@ -585,29 +723,73 @@ impl GraphApp {
                                             );
                                         }
                                         "table" => {
-                                            ui.label(
-                                                RichText::new("x, y").monospace().color(GREEN),
-                                            );
-                                            ui.add(
-                                                egui::TextEdit::multiline(&mut row.table)
-                                                    .font(egui::TextStyle::Monospace)
-                                                    .desired_width(f32::INFINITY)
-                                                    .desired_rows(5)
-                                                    .char_limit(32768),
-                                            );
+                                            if let Ok(points) = table_points(&row.table) {
+                                                egui::ScrollArea::vertical()
+                                                    .id_salt(("table_preview", i))
+                                                    .max_height(190.0)
+                                                    .show(ui, |ui| {
+                                                        egui::Grid::new(("data_grid", i))
+                                                            .striped(true)
+                                                            .spacing([14.0, 5.0])
+                                                            .show(ui, |ui| {
+                                                                ui.strong("x");
+                                                                ui.strong("y");
+                                                                ui.end_row();
+                                                                for point in points.iter().take(200)
+                                                                {
+                                                                    for value in point {
+                                                                        typeset::show(
+                                                                            ui,
+                                                                            &exact::display(
+                                                                                *value,
+                                                                                exact_values,
+                                                                            ),
+                                                                            16.0,
+                                                                        );
+                                                                    }
+                                                                    ui.end_row();
+                                                                }
+                                                            });
+                                                    });
+                                                ui.label(
+                                                    RichText::new(format!(
+                                                        "{} points{}",
+                                                        points.len(),
+                                                        if points.len() > 200 {
+                                                            " · first 200 shown"
+                                                        } else {
+                                                            ""
+                                                        }
+                                                    ))
+                                                    .small()
+                                                    .weak(),
+                                                );
+                                            }
+                                            ui.collapsing("Edit table data (CSV)", |ui| {
+                                                ui.add(
+                                                    egui::TextEdit::multiline(&mut row.table)
+                                                        .font(egui::TextStyle::Monospace)
+                                                        .desired_width(f32::INFINITY)
+                                                        .desired_rows(5)
+                                                        .char_limit(131072),
+                                                );
+                                            });
                                             ui.horizontal(|ui| {
-                                                if ui.button("Fit a line").clicked() {
-                                                    fit = Some(i);
-                                                }
-                                                if let Ok(points) = table_points(&row.table) {
-                                                    ui.label(
-                                                        RichText::new(format!(
-                                                            "{} points",
-                                                            points.len()
-                                                        ))
-                                                        .small()
-                                                        .weak(),
-                                                    );
+                                                egui::ComboBox::from_id_salt(("regression", i))
+                                                    .width(140.0)
+                                                    .selected_text(model_label(&row.regression))
+                                                    .show_ui(ui, |ui| {
+                                                        for (key, label) in REGRESSION_CHOICES {
+                                                            ui.selectable_value(
+                                                                &mut row.regression,
+                                                                key.to_string(),
+                                                                *label,
+                                                            );
+                                                        }
+                                                    });
+                                                if ui.button("Fit").clicked() {
+                                                    fit =
+                                                        Some((i, model_from_key(&row.regression)));
                                                 }
                                             });
                                         }
@@ -617,14 +799,54 @@ impl GraphApp {
                                                 ui.memory_mut(|m| m.request_focus(id));
                                                 self.focus_next = None;
                                             }
-                                            let response = ui.add(
-                                                egui::TextEdit::singleline(&mut row.text)
-                                                    .id(id)
-                                                    .font(FontId::monospace(19.0))
-                                                    .desired_width(f32::INFINITY)
-                                                    .hint_text("Type an expression…")
-                                                    .char_limit(4096),
-                                            );
+                                            let editing = row.text.trim().is_empty()
+                                                || ui.memory(|m| m.has_focus(id))
+                                                || self.focus_next == Some(i);
+                                            let response = if pretty_math && !editing {
+                                                let content = egui::ScrollArea::horizontal()
+                                                    .id_salt(("math_row", i))
+                                                    .auto_shrink([false, true])
+                                                    .max_width(ui.available_width())
+                                                    .show(ui, |ui| {
+                                                        typeset::show(ui, &row.text, 24.0)
+                                                    });
+                                                let math = content.inner;
+                                                let click = ui
+                                                    .interact(
+                                                        math.rect.intersect(ui.clip_rect()),
+                                                        id.with("rendered"),
+                                                        Sense::click(),
+                                                    )
+                                                    .on_hover_text(
+                                                        "Click to edit · plain math or LaTeX",
+                                                    );
+                                                if click.clicked() {
+                                                    self.focus_next = Some(i);
+                                                    self.focused = i;
+                                                }
+                                                click
+                                            } else {
+                                                ui.add(
+                                                    egui::TextEdit::singleline(&mut row.text)
+                                                        .id(id)
+                                                        .font(FontId::monospace(18.0))
+                                                        .desired_width(f32::INFINITY)
+                                                        .hint_text("Type math or LaTeX…")
+                                                        .char_limit(4096),
+                                                )
+                                            };
+                                            if pretty_math
+                                                && response.has_focus()
+                                                && !row.text.trim().is_empty()
+                                            {
+                                                egui::ScrollArea::horizontal()
+                                                    .id_salt(("math_preview", i))
+                                                    .auto_shrink([false, true])
+                                                    .max_width(ui.available_width())
+                                                    .show(ui, |ui| {
+                                                        typeset::show(ui, &row.text, 23.0)
+                                                    });
+                                            }
                                             if response.has_focus() {
                                                 self.focused = i;
                                             }
@@ -670,15 +892,42 @@ impl GraphApp {
                                             } else if let Some(value) =
                                                 self.scene.values.get(i).and_then(|v| *v)
                                             {
-                                                ui.label(
-                                                    RichText::new(format!(
-                                                        "= {}",
-                                                        format_number(value)
-                                                    ))
-                                                    .color(GREEN),
-                                                );
+                                                let label = if exact_values {
+                                                    let normalized =
+                                                        crate::math::normalize_tex(&row.text)
+                                                            .unwrap_or_else(|_| row.text.clone());
+                                                    let expression = Expr::parse(&normalized).ok();
+                                                    expression
+                                                        .as_ref()
+                                                        .and_then(|e| {
+                                                            let body = match e {
+                                                                Expr::Compare(values, ops)
+                                                                    if ops.len() == 1
+                                                                        && ops[0] == "=" =>
+                                                                {
+                                                                    &values[1]
+                                                                }
+                                                                _ => e,
+                                                            };
+                                                            exact::exact_expr(body, &self.scene.env)
+                                                        })
+                                                        .unwrap_or_else(|| {
+                                                            exact::display(value, true)
+                                                        })
+                                                } else {
+                                                    exact::decimal(value)
+                                                };
+                                                ui.horizontal(|ui| {
+                                                    ui.label("=");
+                                                    typeset::show(ui, &label, 20.0);
+                                                });
                                             }
                                         }
+                                    }
+                                    if !row.annotation.is_empty() {
+                                        ui.label(
+                                            RichText::new(&row.annotation).size(11.0).color(GREEN),
+                                        );
                                     }
                                     if let Some(error) = error {
                                         ui.label(
@@ -721,21 +970,16 @@ impl GraphApp {
                             .insert(i + 1, self.document.rows[i].clone());
                     }
                 }
-                if let Some(i) = fit {
-                    match table_points(&self.document.rows[i].table).and_then(|p| linear_fit(&p)) {
-                        Ok((m, b)) => {
-                            self.add_row("expression");
-                            if let Some(row) = self.document.rows.last_mut() {
-                                row.text = format!("y={m:.8}x+({b:.8})");
-                            }
-                            self.status = format!(
-                                "Linear fit: y = {}x + {}",
-                                format_number(m),
-                                format_number(b)
-                            );
-                        }
-                        Err(e) => self.status = e,
-                    }
+                if let Some((i, model)) = fit
+                    && let Err(e) = self.fit_table(i, model)
+                {
+                    self.status = e;
+                }
+                if let Some(i) = table_source {
+                    self.table_dialog = Some(i);
+                    self.table_start = -5.0;
+                    self.table_end = 5.0;
+                    self.table_step = 1.0;
                 }
             });
     }
@@ -757,7 +1001,7 @@ impl GraphApp {
                         ] {
                             for text in row {
                                 if ui
-                                    .add_sized([48.0, 28.0], egui::Button::new(text))
+                                    .add_sized([48.0, 28.0], egui::Button::new(key_label(text)))
                                     .clicked()
                                     && let Some(row) = self.document.rows.get_mut(self.focused)
                                 {
@@ -789,6 +1033,10 @@ impl GraphApp {
                             self.document.degrees = false;
                         }
                         ui.checkbox(&mut self.trace, "Trace");
+                        ui.checkbox(&mut self.document.show_features, "Notable points");
+                        if ui.button("Point list").clicked() {
+                            self.point_inspector = true;
+                        }
                     });
                 });
             });
@@ -836,6 +1084,20 @@ impl GraphApp {
                 if self.cache_view != Some(key) {
                     self.geometry = self.scene.geometry(v, w as usize, h as usize);
                     self.cache_view = Some(key);
+                    self.feature_changed = Instant::now();
+                }
+                if self.document.show_features && self.feature_view != Some(key) {
+                    ctx.request_repaint_after(Duration::from_millis(120));
+                }
+                if self.document.show_features
+                    && self.feature_view != Some(key)
+                    && !response.dragged()
+                    && (self.feature_changed.elapsed() > Duration::from_millis(120)
+                        || self.feature_updated.elapsed() > Duration::from_millis(350))
+                {
+                    self.feature_points = analysis::features(&self.scene, v, &self.geometry);
+                    self.feature_view = Some(key);
+                    self.feature_updated = Instant::now();
                 }
                 paint_grid(&painter, rect, v);
                 for &(c, [x, y, dx, dy]) in &self.geometry.fills {
@@ -849,15 +1111,69 @@ impl GraphApp {
                 }
                 for (c, points) in &self.geometry.lines {
                     let points: Vec<Pos2> = points.iter().map(|p| screen(v, *p, rect)).collect();
-                    painter.add(egui::Shape::line(points, Stroke::new(2.6, color(*c))));
+                    painter.add(egui::Shape::line(points, Stroke::new(2.6_f32, color(*c))));
                 }
                 for &(c, p) in &self.geometry.points {
                     let p = screen(v, p, rect);
                     painter.circle_filled(p, 5.5, color(c));
-                    painter.circle_stroke(p, 5.5, Stroke::new(1.5, Color32::WHITE));
+                    painter.circle_stroke(p, 5.5, Stroke::new(1.5_f32, Color32::WHITE));
+                }
+                if self.document.show_features {
+                    for point in &self.feature_points {
+                        let center = screen(v, point.position, rect);
+                        let shade = if point.kind == FeatureKind::Intersection {
+                            INK
+                        } else {
+                            point
+                                .rows
+                                .first()
+                                .and_then(|row| self.document.rows.get(*row))
+                                .map(|row| color(row.color))
+                                .unwrap_or(INK)
+                        };
+                        painter.circle_filled(center, 4.5, Color32::WHITE);
+                        painter.circle_stroke(center, 4.5, Stroke::new(1.8_f32, shade));
+                        painter.circle_filled(center, 2.2, shade);
+                    }
+                    if let Some(pos) = response.hover_pos().filter(|_| !response.dragged())
+                        && let Some(point) = nearest_feature(&self.feature_points, v, rect, pos)
+                    {
+                        let center = screen(v, point.position, rect);
+                        painter.circle_stroke(center, 7.0, Stroke::new(2.0_f32, GREEN));
+                        let label = format!(
+                            "{}  {}",
+                            feature_name(point.kind),
+                            coordinate_text(point.position, self.document.exact_values)
+                        );
+                        let galley = painter.layout_no_wrap(label, math_font(ctx, 15.0), INK);
+                        let size = galley.size() + Vec2::new(18.0, 14.0);
+                        let location = Pos2::new(
+                            (center.x + 16.0)
+                                .min(rect.right() - size.x - 8.0)
+                                .max(rect.left() + 8.0),
+                            (center.y - size.y - 12.0).max(rect.top() + 8.0),
+                        );
+                        let badge = Rect::from_min_size(location, size);
+                        painter.rect_filled(badge, 6.0, Color32::WHITE);
+                        painter.rect_stroke(
+                            badge,
+                            6.0,
+                            Stroke::new(1.0_f32, Color32::from_gray(200)),
+                            egui::StrokeKind::Inside,
+                        );
+                        painter.galley(location + Vec2::new(9.0, 7.0), galley, INK);
+                        if response.clicked() {
+                            self.selected_point = Some(point.clone());
+                            self.point_inspector = true;
+                        }
+                    }
                 }
                 if self.trace
-                    && let Some(pos) = response.hover_pos().filter(|_| !response.dragged())
+                    && let Some(pos) = response.hover_pos().filter(|pos| {
+                        !response.dragged()
+                            && (!self.document.show_features
+                                || nearest_feature(&self.feature_points, v, rect, *pos).is_none())
+                    })
                 {
                     let local = [
                         f64::from(pos.x - rect.left()),
@@ -866,9 +1182,9 @@ impl GraphApp {
                     if let Some((c, p)) = self.scene.trace(&self.geometry, v, local, w, h) {
                         let point = screen(v, p, rect);
                         painter.circle_filled(point, 5.0, color(c));
-                        painter.circle_stroke(point, 6.0, Stroke::new(2.0, Color32::WHITE));
-                        let text = format!("({}, {})", format_number(p[0]), format_number(p[1]));
-                        let galley = painter.layout_no_wrap(text, FontId::monospace(13.0), INK);
+                        painter.circle_stroke(point, 6.0, Stroke::new(2.0_f32, Color32::WHITE));
+                        let text = coordinate_text(p, self.document.exact_values);
+                        let galley = painter.layout_no_wrap(text, math_font(ctx, 14.0), INK);
                         let size = galley.size() + Vec2::new(16.0, 12.0);
                         let location = Pos2::new(
                             (point.x + 14.0).min(rect.right() - size.x - 8.0),
@@ -882,7 +1198,7 @@ impl GraphApp {
                         painter.rect_stroke(
                             Rect::from_min_size(location, size),
                             5.0,
-                            Stroke::new(1.0, Color32::from_gray(205)),
+                            Stroke::new(1.0_f32, Color32::from_gray(205)),
                             egui::StrokeKind::Inside,
                         );
                         painter.galley(location + Vec2::new(8.0, 6.0), galley, INK);
@@ -900,7 +1216,7 @@ impl GraphApp {
                     .show(ctx, |ui| {
                         egui::Frame::new()
                             .fill(Color32::WHITE)
-                            .stroke(Stroke::new(1.0, Color32::from_gray(220)))
+                            .stroke(Stroke::new(1.0_f32, Color32::from_gray(220)))
                             .inner_margin(5)
                             .corner_radius(7)
                             .show(ui, |ui| {
@@ -938,6 +1254,14 @@ impl GraphApp {
                 ui.checkbox(&mut self.document.viewport.grid, "Show grid");
                 ui.checkbox(&mut self.document.viewport.axes, "Show axes and labels");
                 ui.checkbox(&mut self.trace, "Trace coordinates on hover");
+                ui.checkbox(&mut self.document.show_features,"Mark turning points and intersections");
+                ui.checkbox(&mut self.document.pretty_math,"Render mathematical notation");
+                ui.separator();ui.label("Value display");
+                ui.radio_value(&mut self.document.exact_values,false,"Decimal approximations (12 significant digits)");
+                ui.radio_value(&mut self.document.exact_values,true,"Exact forms when available: π, roots, fractions");
+                ui.small("Supported constant expressions can be exact. Numerically recognized forms and feature coordinates are marked ≈.");
+                if ui.button("Inspect notable points").clicked(){self.point_inspector=true;}
+
                 ui.separator();
                 let mut v = self.document.viewport;
                 egui::Grid::new("bounds").show(ui, |ui| {
@@ -974,12 +1298,55 @@ impl GraphApp {
             });
         self.settings = open;
     }
+    fn table_window(&mut self, ctx: &egui::Context) {
+        let Some(index) = self.table_dialog else {
+            return;
+        };
+        let mut open = true;
+        let mut generate = false;
+        egui::Window::new("Generate a table from an equation").open(&mut open).default_width(400.0).show(ctx,|ui| {
+            ui.label(format!("Source: expression {}",index+1));
+            if let Some(row)=self.document.rows.get(index){typeset::show(ui,&row.text,22.0);}
+            ui.label("Set the x range, or the parameter range for polar and parametric curves.");
+            egui::Grid::new("table_range").show(ui,|ui| {for (label,value) in [("Start",&mut self.table_start),("End",&mut self.table_end),("Step",&mut self.table_step)] {ui.label(label);ui.add(egui::DragValue::new(value).speed(0.1).max_decimals(12));ui.end_row();}});
+            ui.small("Up to 2048 samples. Undefined values and points outside domain restrictions are skipped. Values are stored at full floating-point precision.");
+            if ui.button("Generate table").clicked(){generate=true;}
+        });
+        if generate {
+            match self.generate_from_row(index, self.table_start, self.table_end, self.table_step) {
+                Ok(()) => open = false,
+                Err(e) => self.status = e,
+            }
+        }
+        if !open {
+            self.table_dialog = None;
+        }
+    }
+    fn points_window(&mut self, ctx: &egui::Context) {
+        let mut open = self.point_inspector;
+        egui::Window::new("Notable points").open(&mut open).default_width(420.0).show(ctx,|ui| {
+            if let Some(point)=&self.selected_point {
+                ui.heading(feature_name(point.kind));typeset::show(ui,&coordinate_text(point.position,self.document.exact_values),25.0);
+                ui.label(format!("Expressions: {}",point.rows.iter().map(|r|(r+1).to_string()).collect::<Vec<_>>().join(", ")));
+                ui.small("Position refined numerically. ≈ denotes an approximation, including recognized π or radical forms.");ui.separator();
+            }
+            if self.feature_points.is_empty(){ui.label("No notable points found in this view. Enable markers in Graph settings and let the graph settle.");}
+            egui::ScrollArea::vertical().max_height(360.0).show(ui,|ui| {
+                for point in &self.feature_points {
+                    let label=format!("{} · {}",feature_name(point.kind),coordinate_text(point.position,self.document.exact_values));
+                    if ui.selectable_label(self.selected_point.as_ref().is_some_and(|p|p.kind==point.kind&&p.position==point.position),label).clicked(){self.selected_point=Some(point.clone());}
+                }
+            });
+            ui.separator();ui.small("Markers use bounded numerical analysis. Closely spaced or very small features may require zooming. Explicit, implicit, polar and parametric curves are supported; densely packed features may be missed by finite sampling.");
+        });
+        self.point_inspector = open;
+    }
     fn help_window(&mut self, ctx: &egui::Context) {
         let mut open = self.help;
         egui::Window::new("Welcome to Rust Graph").open(&mut open).default_width(550.0).show(ctx,|ui| {
             ui.heading("A little space to explore mathematics.");ui.label("Enter expressions on the left. Every graph updates as you type.");ui.add_space(12.0);
             egui::Grid::new("help_examples").striped(true).spacing(Vec2::new(18.0,9.0)).show(ui,|ui| {
-                for (label,sample) in [("Functions","y = sin(x),  f(u) = u^2 + 1"),("Implicit relations","x^2 + y^2 = 25"),("Inequalities","y < x^2"),("Domain restrictions","y = sqrt(x) {0 < x < 9}"),("Piecewise","y = {x < 0: -x, x^2}"),("Polar","r = 4*cos(3*theta)"),("Parametric","(3*cos(t), 2*sin(t))"),("Points","(2, 3)"),("Sliders","a = 1, then y = a*sin(x)"),("Tables","Add → Table; one x, y pair per line"),("Arithmetic","2x, pi, e, ^, !, sqrt, abs, ln, log")]
+                for (label,sample) in [("Functions","y = sin(x),  f(u) = u^2 + 1"),("Implicit relations","x^2 + y^2 = 25"),("Inequalities","y < x^2"),("Domain restrictions","y = sqrt(x) {0 < x < 9}"),("Piecewise","y = {x < 0: -x, x^2}"),("Polar","r = 4*cos(3*theta)"),("Parametric","(3*cos(t), 2*sin(t))"),("Points","(2, 3)"),("Sliders","a = 1, then y = a*sin(x)"),("Tables","Add → Table; one x, y pair per line"),("Arithmetic","2x, pi, e, ^, !, sqrt, abs, ln, log"),("Math notation",r"\sqrt{x}, \frac{1}{2}, x^{2}"),("Analysis","Click marked turning points and intersections"),("Regression","Choose a model in a table, then Fit"),("Generate table","Expression … menu → Generate table"),("Exact values","Settings → Exact values or decimal approximations")]
                 {ui.label(label);ui.monospace(sample);ui.end_row();}
             });ui.add_space(12.0);ui.label("Right-click a color dot to change it. Use Enter to add another expression. Ctrl+Z / Ctrl+Shift+Z undo and redo. Save/open .rustgraph files through File. PNG and SVG exports contain the current graph view.");
             ui.separator();ui.small("Independent open-source implementation inspired by Desmos. Advanced list algebra, symbolic solving, audio tracing, images and actions are outside this version.");
@@ -1053,7 +1420,7 @@ fn paint_grid(painter: &egui::Painter, rect: Rect, v: Viewport) {
                 } else {
                     (Pos2::new(rect.left(), p.y), Pos2::new(rect.right(), p.y))
                 };
-                painter.line_segment([a, b], Stroke::new(1.0, shade));
+                painter.line_segment([a, b], Stroke::new(1.0_f32, shade));
             }
         }
     }
@@ -1064,14 +1431,14 @@ fn paint_grid(painter: &egui::Painter, rect: Rect, v: Viewport) {
                 Pos2::new(origin.x, rect.top()),
                 Pos2::new(origin.x, rect.bottom()),
             ],
-            Stroke::new(1.4, Color32::from_gray(90)),
+            Stroke::new(1.4_f32, Color32::from_gray(90)),
         );
         painter.line_segment(
             [
                 Pos2::new(rect.left(), origin.y),
                 Pos2::new(rect.right(), origin.y),
             ],
-            Stroke::new(1.4, Color32::from_gray(90)),
+            Stroke::new(1.4_f32, Color32::from_gray(90)),
         );
         for (vertical, step, min, max) in [(true, xs, v.xmin, v.xmax), (false, ys, v.ymin, v.ymax)]
         {
@@ -1117,7 +1484,7 @@ fn color_dot(ui: &mut egui::Ui, index: usize, visible: bool) -> egui::Response {
         ui.painter().circle_filled(center, 7.0, color(index));
     } else {
         ui.painter()
-            .circle_stroke(center, 7.0, Stroke::new(2.0, color(index)));
+            .circle_stroke(center, 7.0, Stroke::new(2.0_f32, color(index)));
     }
     response.on_hover_text("Toggle graph · right-click for color")
 }
@@ -1136,7 +1503,7 @@ fn brand_icon(ui: &mut egui::Ui) {
         .collect();
     ui.painter().add(egui::Shape::line(
         points,
-        Stroke::new(2.4, Color32::from_rgb(155, 227, 204)),
+        Stroke::new(2.4_f32, Color32::from_rgb(155, 227, 204)),
     ));
 }
 enum GraphIcon {
@@ -1149,7 +1516,7 @@ fn graph_button(ui: &mut egui::Ui, icon: GraphIcon) -> egui::Response {
     let response = ui.add_sized([37.0, 34.0], egui::Button::new(""));
     let c = response.rect.center();
     let painter = ui.painter();
-    let stroke = Stroke::new(1.8, Color32::from_rgb(75, 83, 87));
+    let stroke = Stroke::new(1.8_f32, Color32::from_rgb(75, 83, 87));
     let label = match icon {
         GraphIcon::ZoomIn | GraphIcon::ZoomOut => {
             painter.line_segment([c + Vec2::new(-7.0, 0.0), c + Vec2::new(7.0, 0.0)], stroke);
@@ -1196,4 +1563,101 @@ fn graph_button(ui: &mut egui::Ui, icon: GraphIcon) -> egui::Response {
     };
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
     response.on_hover_text(label)
+}
+
+const REGRESSION_CHOICES: &[(&str, &str)] = &[
+    ("linear", "Linear"),
+    ("quadratic", "Quadratic"),
+    ("cubic", "Cubic"),
+    ("poly4", "Polynomial degree 4"),
+    ("poly5", "Polynomial degree 5"),
+    ("poly6", "Polynomial degree 6"),
+    ("exponential", "Exponential"),
+    ("logarithmic", "Logarithmic"),
+    ("power", "Power"),
+    ("sinusoidal", "Sinusoidal"),
+];
+fn model_from_key(key: &str) -> RegressionModel {
+    match key {
+        "quadratic" => RegressionModel::Quadratic,
+        "cubic" => RegressionModel::Cubic,
+        "poly4" => RegressionModel::Polynomial(4),
+        "poly5" => RegressionModel::Polynomial(5),
+        "poly6" => RegressionModel::Polynomial(6),
+        "exponential" => RegressionModel::Exponential,
+        "logarithmic" => RegressionModel::Logarithmic,
+        "power" => RegressionModel::Power,
+        "sinusoidal" => RegressionModel::Sinusoidal,
+        _ => RegressionModel::Linear,
+    }
+}
+fn model_label(key: &str) -> &str {
+    REGRESSION_CHOICES
+        .iter()
+        .find(|(name, _)| *name == key)
+        .map(|(_, label)| *label)
+        .unwrap_or("Linear")
+}
+fn key_label(key: &str) -> &str {
+    match key {
+        "sqrt(" => "√",
+        "pi" => "π",
+        "*" => "×",
+        "/" => "÷",
+        "^" => "xⁿ",
+        _ => key,
+    }
+}
+fn feature_name(kind: FeatureKind) -> &'static str {
+    match kind {
+        FeatureKind::Maximum => "Maximum / apex",
+        FeatureKind::Minimum => "Minimum / turning point",
+        FeatureKind::XIntercept => "x-intercept",
+        FeatureKind::YIntercept => "y-intercept",
+        FeatureKind::Intersection => "Intersection",
+    }
+}
+fn coordinate_text(point: [f64; 2], exact_mode: bool) -> String {
+    let x = exact::display(point[0], exact_mode);
+    let y = exact::display(point[1], exact_mode);
+    format!(
+        "≈ ({}, {})",
+        x.trim_start_matches("≈ "),
+        y.trim_start_matches("≈ ")
+    )
+}
+fn math_font(ctx: &egui::Context, size: f32) -> FontId {
+    let family = egui::FontFamily::Name("math".into());
+    FontId::new(
+        size,
+        if ctx.fonts(|f| f.families().contains(&family)) {
+            family
+        } else {
+            egui::FontFamily::Proportional
+        },
+    )
+}
+fn nearest_feature(
+    points: &[FeaturePoint],
+    v: Viewport,
+    rect: Rect,
+    pos: Pos2,
+) -> Option<&FeaturePoint> {
+    points
+        .iter()
+        .filter(|p| screen(v, p.position, rect).distance(pos) < 10.0)
+        .min_by(|a, b| {
+            let priority = |kind: FeatureKind| match kind {
+                FeatureKind::Intersection => 0,
+                FeatureKind::Minimum | FeatureKind::Maximum => 1,
+                _ => 2,
+            };
+            let da = screen(v, a.position, rect).distance(pos);
+            let db = screen(v, b.position, rect).distance(pos);
+            if (da - db).abs() < 0.5 {
+                priority(a.kind).cmp(&priority(b.kind))
+            } else {
+                da.total_cmp(&db)
+            }
+        })
 }

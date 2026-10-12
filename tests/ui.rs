@@ -100,3 +100,38 @@ fn pan_in_canvas_changes_bounds() {
     );
     assert!(app.document.viewport.xmin < old.xmin);
 }
+
+#[test]
+fn app_regression_and_generated_tables_are_graphable() {
+    use rust_graph::regression::RegressionModel;
+    let mut table = Row::expression("", 0);
+    table.kind = "table".into();
+    table.table = "-2,7\n-1,4\n0,3\n1,4\n2,7".into();
+    let mut app = GraphApp::from_document(Document {
+        rows: vec![table],
+        ..Default::default()
+    });
+    app.fit_table(0, RegressionModel::Quadratic).unwrap();
+    assert_eq!(app.document.rows.len(), 2);
+    let scene = app.document.compile();
+    assert!(scene.errors.iter().all(Option::is_none));
+    app.generate_from_row(1, -2.0, 2.0, 1.0).unwrap();
+    assert_eq!(app.document.rows.len(), 3);
+    let points = rust_graph::document::table_points(&app.document.rows[2].table).unwrap();
+    assert_eq!(points.len(), 5);
+    assert!((points[2][1] - 3.0).abs() < 1e-10);
+}
+
+#[test]
+fn generated_table_at_sample_limit_can_be_saved() {
+    let mut app = GraphApp::from_document(Document {
+        rows: vec![Row::expression("y=x", 0)],
+        ..Default::default()
+    });
+    app.generate_from_row(0, 0.0, 2047.0, 1.0).unwrap();
+    assert!(
+        app.document.validate().is_ok(),
+        "generated table exceeds file limits"
+    );
+    assert!(Document::decode(&serde_json::to_string(&app.document).unwrap()).is_ok());
+}

@@ -1,0 +1,14 @@
+# Mathematical tools and presentation
+
+The user requests a more Desmos-like mathematical experience in the existing installed Rust Graph: radicals and LaTeX-like presentation, increased numerical precision, points at turning points/apexes/intersections, exact vs decimal values, additional regressions, and tables generated automatically from equations. The existing desktop install and JohnDSdev/rust-graph publication remain part of the delivery; preserve user graph/session data.
+
+## Design
+Use bundled STIX Two Math (OFL licensed), native egui mathematical layout with stacked fractions, superscripts and radical bars. Editable text remains visible when focused; rendered notation appears when not editing, plus a preview while editing. Accept a bounded useful subset of LaTeX (frac, sqrt, pi, theta, trig names, exponent braces, left/right delimiters). No webview or network runtime.
+
+Add isolated pure-Rust modules: `analysis.rs` computes refined feature positions; `exact.rs` formats values and proves symbolic forms for supported scalar AST expressions; `regression.rs` fits standard models and generates numerical tables. Root integrates them in `app.rs`, adds `typeset.rs`, and normalizes LaTeX in `math.rs` and document compilation.
+
+Analysis marks maxima, minima, x/y intercepts and intersections, with bounded sampling and refinement. Use Newton/bisection or safeguarded root solvers and check residuals so poles are never intersections. Include tangent intersections. Provide marker visibility settings, clickable/hover labels, and a point inspector. Settings persist via backward-compatible serde defaults. Refined numeric points remain numerical estimates; recognized pi/radical forms from numerical coordinates are marked approximate. Supported exact AST scalar expressions can display provable rational/pi/radical forms without the approximate mark. Decimal values use up to 12 significant digits.
+
+Regressions include linear, quadratic, cubic/general polynomial (degree 1–6), exponential, logarithmic, power and sinusoidal if reliable. Show fitted equation, R² and residual error. Reject invalid model domains and rank-deficient input instead of returning invented coefficients. Table rows expose a model selector and fit action. Equation rows expose Generate table; a dialog accepts independent-variable start/end/step and generates at most 2048 points, respecting domain holes/restrictions. CSV source is stored with enough digits for round trips.
+
+Keep workloads bounded, precision honest, expression error handling intact, and existing .rustgraph documents readable. Update desktop installation and repository after fmt/clippy/test/release/native QA. Fix the CI warnings caused by future rustc's numeric fallback lint with explicit f32 stroke widths and current Clippy suggestions.

@@ -216,3 +216,27 @@ fn polar_uses_the_displayed_parameter_range() {
             .any(|p| p[0].hypot(p[1]) > 9.9)
     );
 }
+
+#[test]
+fn latex_equations_compile_as_graphs() {
+    let s = doc(&[r"a=\frac{1}{2}", r"y=a\sqrt{x}"]).compile();
+    assert!(s.errors.iter().all(Option::is_none), "{:?}", s.errors);
+    assert!(!s.geometry(Viewport::default(), 600, 400).lines.is_empty());
+}
+#[test]
+fn old_files_get_math_display_defaults_and_settings_round_trip() {
+    let mut value = serde_json::to_value(doc(&["y=x"])).unwrap();
+    value.as_object_mut().unwrap().remove("pretty_math");
+    value.as_object_mut().unwrap().remove("show_features");
+    value.as_object_mut().unwrap().remove("exact_values");
+    let restored = Document::decode(&value.to_string()).unwrap();
+    let defaults = serde_json::to_value(restored).unwrap();
+    assert_eq!(defaults["pretty_math"], true);
+    assert_eq!(defaults["show_features"], true);
+    value["exact_values"] = serde_json::Value::Bool(true);
+    let restored = Document::decode(&value.to_string()).unwrap();
+    assert_eq!(
+        serde_json::to_value(restored).unwrap()["exact_values"],
+        true
+    );
+}

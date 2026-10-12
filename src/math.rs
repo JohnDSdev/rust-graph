@@ -64,15 +64,17 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
             if dots > 1 {
                 return Err("Invalid number".into());
             }
-            // Scientific notation is recognized only with an explicit signed exponent.
-            if i + 2 < chars.len()
-                && matches!(chars[i], 'e' | 'E')
-                && matches!(chars[i + 1], '+' | '-')
-                && chars[i + 2].is_ascii_digit()
-            {
-                i += 2;
-                while i < chars.len() && chars[i].is_ascii_digit() {
-                    i += 1;
+            // A trailing e is Euler's constant; e followed by exponent digits is scientific notation.
+            if matches!(chars.get(i), Some('e' | 'E')) {
+                let mut exponent = i + 1;
+                if matches!(chars.get(exponent), Some('+' | '-')) {
+                    exponent += 1;
+                }
+                if chars.get(exponent).is_some_and(|c| c.is_ascii_digit()) {
+                    i = exponent + 1;
+                    while chars.get(i).is_some_and(|c| c.is_ascii_digit()) {
+                        i += 1;
+                    }
                 }
             }
             let s: String = chars[start..i].iter().collect();
@@ -212,10 +214,7 @@ impl Parser {
             {
                 let mut values = vec![lhs];
                 let mut ops = Vec::new();
-                loop {
-                    let Token::Op(op) = self.peek() else {
-                        break;
-                    };
+                while let Token::Op(op) = self.peek() {
                     if !["<", ">", "<=", ">=", "=", "==", "!="].contains(&op.as_str()) {
                         break;
                     }
@@ -259,7 +258,7 @@ impl Parser {
 impl Expr {
     pub fn parse(input: &str) -> Result<Self, String> {
         let mut p = Parser {
-            tokens: tokenize(input)?,
+            tokens: tokenize(&normalize_tex(input)?)?,
             pos: 0,
             depth: 0,
         };
@@ -562,4 +561,246 @@ fn builtin(name: &str, a: &[f64], degrees: bool) -> Result<f64, String> {
         _ => return Err(format!("Unknown function: {name}")),
     };
     Ok(value)
+}
+
+/// Convert a useful, bounded subset of LaTeX into calculator notation.
+/// Plain piecewise/domain braces are retained; TeX argument braces become groups.
+pub fn normalize_tex(text: &str) -> Result<String, String> {
+    if text.len() > 4096 {
+        return Err("Expression is too long".into());
+    }
+    struct Reader {
+        chars: Vec<char>,
+        pos: usize,
+    }
+    impl Reader {
+        fn space(&mut self) {
+            while self.pos < self.chars.len() && self.chars[self.pos].is_whitespace() {
+                self.pos += 1;
+            }
+        }
+        fn group(&mut self, depth: usize) -> Result<String, String> {
+            self.space();
+            let open = *self.chars.get(self.pos).ok_or("Missing LaTeX argument")?;
+            let close = match open {
+                '{' => '}',
+                '(' => ')',
+                '[' => ']',
+                _ => return Err("LaTeX argument needs braces or parentheses".into()),
+            };
+            self.pos += 1;
+            self.segment(Some(close), depth + 1)
+        }
+        fn atom(&mut self, depth: usize) -> Result<String, String> {
+            self.space();
+            if self
+                .chars
+                .get(self.pos)
+                .is_some_and(|c| matches!(c, '{' | '('))
+            {
+                return self.group(depth);
+            }
+            let start = self.pos;
+            if self.chars.get(self.pos) == Some(&'\\') {
+                self.pos += 1;
+                while self
+                    .chars
+                    .get(self.pos)
+                    .is_some_and(|c| c.is_ascii_alphabetic())
+                {
+                    self.pos += 1;
+                }
+            } else {
+                while self
+                    .chars
+                    .get(self.pos)
+                    .is_some_and(|c| c.is_alphanumeric() || *c == '.' || *c == '_')
+                {
+                    self.pos += 1;
+                }
+            }
+            if start == self.pos {
+                return Err("Missing radical argument".into());
+            }
+            normalize_tex(&self.chars[start..self.pos].iter().collect::<String>())
+        }
+        fn segment(&mut self, end: Option<char>, depth: usize) -> Result<String, String> {
+            if depth > 32 {
+                return Err("LaTeX is nested too deeply".into());
+            }
+            let mut out = String::new();
+            let mut absolute = false;
+            while let Some(&c) = self.chars.get(self.pos) {
+                self.pos += 1;
+                if Some(c) == end {
+                    if absolute {
+                        return Err("Unclosed absolute value".into());
+                    }
+                    return Ok(out);
+                }
+                match c {
+                    '\\' => {
+                        let start = self.pos;
+                        while self
+                            .chars
+                            .get(self.pos)
+                            .is_some_and(|c| c.is_ascii_alphabetic())
+                        {
+                            self.pos += 1;
+                        }
+                        let command: String = self.chars[start..self.pos].iter().collect();
+                        if command.is_empty() {
+                            let escape =
+                                *self.chars.get(self.pos).ok_or("Incomplete LaTeX command")?;
+                            self.pos += 1;
+                            match escape {
+                                '{' | '}' | '(' | ')' | '|' => out.push(escape),
+                                ',' | ';' | '!' | ' ' => out.push(' '),
+                                _ => return Err(format!("Unsupported LaTeX escape: {escape}")),
+                            }
+                            continue;
+                        }
+                        if matches!(
+                            command.as_str(),
+                            "frac"
+                                | "dfrac"
+                                | "tfrac"
+                                | "sqrt"
+                                | "pi"
+                                | "theta"
+                                | "tau"
+                                | "sin"
+                                | "cos"
+                                | "tan"
+                                | "sec"
+                                | "csc"
+                                | "cot"
+                                | "asin"
+                                | "acos"
+                                | "atan"
+                                | "arcsin"
+                                | "arccos"
+                                | "arctan"
+                                | "sinh"
+                                | "cosh"
+                                | "tanh"
+                                | "ln"
+                                | "log"
+                                | "exp"
+                                | "min"
+                                | "max"
+                        ) && out
+                            .trim_end()
+                            .chars()
+                            .last()
+                            .is_some_and(|c| c.is_alphanumeric() || matches!(c, ')' | '}' | ']'))
+                        {
+                            out.push('*');
+                        }
+                        match command.as_str() {
+                            "frac" | "dfrac" | "tfrac" => {
+                                let a = self.group(depth)?;
+                                let b = self.group(depth)?;
+                                out.push_str(&format!("(({a})/({b}))"));
+                            }
+                            "sqrt" => {
+                                self.space();
+                                let index = if self.chars.get(self.pos) == Some(&'[') {
+                                    Some(self.group(depth)?)
+                                } else {
+                                    None
+                                };
+                                let body = self.atom(depth)?;
+                                if let Some(n) = index {
+                                    out.push_str(&format!("root(({body}),({n}))"));
+                                } else {
+                                    out.push_str(&format!("sqrt({body})"));
+                                }
+                            }
+                            "pi" => out.push_str("pi"),
+                            "theta" => out.push_str("theta"),
+                            "tau" => out.push_str("tau"),
+                            "cdot" | "times" => out.push('*'),
+                            "div" => out.push('/'),
+                            "le" | "leq" => out.push_str("<="),
+                            "ge" | "geq" => out.push_str(">="),
+                            "ne" | "neq" => out.push_str("!="),
+                            "left" | "right" => {}
+                            "quad" | "qquad" => out.push(' '),
+                            "operatorname" | "mathrm" | "mathit" => {
+                                let name = self.group(depth)?;
+                                if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                                    return Err("Invalid LaTeX name".into());
+                                }
+                                out.push_str(&name);
+                            }
+                            "sin" | "cos" | "tan" | "sec" | "csc" | "cot" | "arcsin" | "arccos"
+                            | "arctan" | "asin" | "acos" | "atan" | "sinh" | "cosh" | "tanh"
+                            | "ln" | "log" | "exp" | "min" | "max" => out.push_str(&command),
+                            "lvert" => out.push_str("abs("),
+                            "rvert" => out.push(')'),
+                            _ => return Err(format!("Unsupported LaTeX command: \\{command}")),
+                        }
+                    }
+                    '√' => {
+                        if out
+                            .trim_end()
+                            .chars()
+                            .last()
+                            .is_some_and(|c| c.is_alphanumeric() || matches!(c, ')' | '}' | ']'))
+                        {
+                            out.push('*');
+                        }
+                        let body = self.atom(depth)?;
+                        out.push_str(&format!("sqrt({body})"));
+                    }
+                    '^' => {
+                        out.push('^');
+                        self.space();
+                        if self.chars.get(self.pos) == Some(&'{') {
+                            let group = self.group(depth)?;
+                            out.push_str(&format!("({group})"));
+                        }
+                    }
+                    '_' => {
+                        out.push('_');
+                        if self.chars.get(self.pos) == Some(&'{') {
+                            let name = self.group(depth)?;
+                            if !name.chars().all(|c| c.is_ascii_alphanumeric()) {
+                                return Err("Subscripts must be letters or digits".into());
+                            }
+                            out.push_str(&name);
+                        }
+                    }
+                    '{' => {
+                        out.push('{');
+                        out.push_str(&self.segment(Some('}'), depth + 1)?);
+                        out.push('}');
+                    }
+                    '|' => {
+                        if self.chars.get(self.pos) == Some(&'|') {
+                            self.pos += 1;
+                            out.push_str("||");
+                        } else {
+                            out.push_str(if absolute { ")" } else { "abs(" });
+                            absolute = !absolute;
+                        }
+                    }
+                    _ => out.push(c),
+                }
+            }
+            if end.is_some() {
+                Err("Unclosed LaTeX group".into())
+            } else if absolute {
+                Err("Unclosed absolute value".into())
+            } else {
+                Ok(out)
+            }
+        }
+    }
+    Reader {
+        chars: text.chars().collect(),
+        pos: 0,
+    }
+    .segment(None, 0)
 }

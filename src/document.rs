@@ -1,7 +1,7 @@
 //! Versioned graph files and compilation of expression rows into a scene.
 use crate::{
     graph::{Plot, PlotKind, Scene, Viewport},
-    math::{Env, Expr},
+    math::{Env, Expr, normalize_tex},
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, path::Path};
@@ -13,6 +13,12 @@ pub struct Document {
     pub degrees: bool,
     pub title: String,
     pub version: u32,
+    #[serde(default)]
+    pub exact_values: bool,
+    #[serde(default = "enabled")]
+    pub pretty_math: bool,
+    #[serde(default = "enabled")]
+    pub show_features: bool,
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Row {
@@ -25,6 +31,10 @@ pub struct Row {
     pub max: f64,
     pub step: f64,
     pub animate: bool,
+    #[serde(default = "default_regression")]
+    pub regression: String,
+    #[serde(default)]
+    pub annotation: String,
 }
 impl Row {
     pub fn expression(text: &str, color: usize) -> Self {
@@ -41,6 +51,8 @@ impl Row {
             max: if angular { std::f64::consts::TAU } else { 10.0 },
             step: 0.1,
             animate: false,
+            regression: default_regression(),
+            annotation: String::new(),
         }
     }
 }
@@ -55,6 +67,9 @@ impl Default for Document {
             degrees: false,
             title: "Untitled Graph".into(),
             version: 1,
+            exact_values: false,
+            pretty_math: true,
+            show_features: true,
         }
     }
 }
@@ -146,7 +161,8 @@ fn definition(text: &str) -> Option<(String, Expr)> {
     Some((a.into(), Expr::parse(b).ok()?))
 }
 pub fn parameter(text: &str) -> Option<(String, f64)> {
-    let (name, expr) = definition(text)?;
+    let normalized = normalize_tex(text).ok()?;
+    let (name, expr) = definition(&normalized)?;
     if !expr.variables().is_empty() {
         return None;
     }
@@ -175,8 +191,10 @@ impl Document {
             return Err("Graph exceeds document limits".into());
         }
         for row in &self.rows {
-            if row.text.len() > 4096
-                || row.table.len() > 32768
+            if row.annotation.len() > 1024
+                || row.regression.len() > 32
+                || row.text.len() > 4096
+                || row.table.len() > 131072
                 || row.color >= 6
                 || !matches!(row.kind.as_str(), "expression" | "table" | "note")
             {
@@ -198,6 +216,9 @@ impl Document {
         self.validate()?;
         let data = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
         let tmp = path.with_extension("rustgraph.tmp");
+        if data.len() > 4 * 1024 * 1024 {
+            return Err("Graph file exceeds 4 MB".into());
+        }
         std::fs::write(&tmp, data).map_err(|e| e.to_string())?;
         std::fs::rename(tmp, path).map_err(|e| e.to_string())
     }
@@ -218,7 +239,14 @@ impl Document {
             if row.kind != "expression" {
                 continue;
             }
-            let text = row.text.trim();
+            let normalized = match normalize_tex(row.text.trim()) {
+                Ok(t) => t,
+                Err(e) => {
+                    scene.errors[i] = Some(e);
+                    continue;
+                }
+            };
+            let text = normalized.as_str();
             if let Some((a, "=", b)) = relation(text) {
                 if let Some(open) = a.find('(') {
                     let name = a[..open].trim();
@@ -312,10 +340,11 @@ impl Document {
                 }
                 continue;
             }
-            if definition(row.text.trim()).is_some() {
+            let normalized = normalize_tex(row.text.trim()).unwrap_or_else(|_| row.text.clone());
+            if definition(&normalized).is_some() {
                 continue;
             }
-            if relation(row.text.trim()).is_some_and(|(a, op, _)| {
+            if relation(&normalized).is_some_and(|(a, op, _)| {
                 op == "=" && a.contains('(') && identifier(a.split('(').next().unwrap_or(""))
             }) {
                 continue;
@@ -337,8 +366,7 @@ impl Document {
 }
 
 fn compile_plot(row: &Row, i: usize, env: &Env) -> Result<(Option<Plot>, Option<f64>), String> {
-    let text = row
-        .text
+    let text = normalize_tex(row.text.trim())?
         .trim()
         .replace('θ', "theta")
         .replace('≤', "<=")
@@ -483,4 +511,11 @@ pub fn valid_range(min: f64, max: f64, step: f64) -> bool {
         && (1e-9..=2e12).contains(&(max - min))
         && step > 0.0
         && step <= max - min
+}
+
+fn enabled() -> bool {
+    true
+}
+fn default_regression() -> String {
+    "linear".into()
 }

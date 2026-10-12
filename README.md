@@ -11,9 +11,11 @@ A native, offline graphing calculator for Linux, written in Rust. Inspired by th
 - Parameters with sliders, animation, editable ranges, and steps.
 - User-defined functions, piecewise expressions, domain restrictions, implicit multiplication, and radians/degrees.
 - Pan and zoom, adjustable bounds, equal axis scale, grid/axes settings, and coordinate tracing.
-- CSV-style point tables and least-squares linear fitting.
+- Point tables, automatic equation-to-table sampling, and linear, polynomial (degrees 2–6), exponential, logarithmic, power, and sinusoidal regressions.
 - Native open/save dialogs, local session recovery, and PNG/SVG exports.
-- Example graphs and an on-screen math keypad.
+- Typeset radicals, fractions and powers with a bundled STIX math font, plus an on-screen math keypad.
+- Turning points, intercepts and intersections with clickable coordinate markers.
+- Twelve-significant-digit decimal coordinates and optional exact-style π, rational and radical forms.
 
 ## Examples
 
@@ -30,9 +32,9 @@ A native, offline graphing calculator for Linux, written in Rust. Inspired by th
 | `(3*cos(t),2*sin(t))` | Parametric ellipse; adjust the t range |
 | `(2,3)` | Point |
 
-Use explicit `*` between named variables (`a*b`). Multiplication such as `2x`, `2(x+1)` and `x(x+1)` is supported. The editor uses plain mathematical text rather than LaTeX. Constants: `pi`, `e`, `tau`; Unicode π and θ are accepted. Powers: `^`; factorial: `!`. Builtins include `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`, `tanh`, `sqrt`, `cbrt`, `root`, `abs`, `exp`, `ln`, `log`, `log2`, `floor`, `ceil`, `round`, `sign`, `min`, `max`, `mod`, and `pow`. `log(x)` is base 10; `log(x,b)` uses base b.
+Use explicit `*` between named variables (`a*b`). Multiplication such as `2x`, `2(x+1)` and `x(x+1)` is supported. The editor accepts plain math and a LaTeX subset: `\sqrt{x}`, `\sqrt[3]{x}`, `\frac{a}{b}`, `x^{2}`, `\pi`, and common function commands. Click a typeset expression to edit its source. Constants: `pi`, `e`, `tau`; Unicode π and θ are accepted. Powers: `^`; factorial: `!`. Builtins include `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`, `tanh`, `sqrt`, `cbrt`, `root`, `abs`, `exp`, `ln`, `log`, `log2`, `floor`, `ceil`, `round`, `sign`, `min`, `max`, `mod`, and `pow`. `log(x)` is base 10; `log(x,b)` uses base b.
 
-Tables accept one numeric `x,y` pair per line. Right-click a row's colored circle to choose a color. Enter adds a row. Drag the graph to pan, scroll to zoom, double-click to reset. Hover near a curve to trace coordinates. Ctrl+O opens; Ctrl+S saves; Ctrl+Shift+S saves as; Ctrl+Z and Ctrl+Shift+Z undo/redo.
+Use an expression’s **… → Generate table** menu to choose a sampling range and step. Tables accept one numeric `x,y` pair per line; choose a model and click **Fit** to add its equation. Enable **Exact values** in settings for π/radical coordinate forms. Numerically recognized forms retain an ≈ indicator; proven scalar expressions can display exact results. Click a notable point to inspect its coordinates. Right-click a row's colored circle to choose a color. Enter adds a row. Drag the graph to pan, scroll to zoom, double-click to reset. Hover near a curve to trace coordinates. Ctrl+O opens; Ctrl+S saves; Ctrl+Shift+S saves as; Ctrl+Z and Ctrl+Shift+Z undo/redo.
 
 ## Build and install
 
@@ -57,7 +59,7 @@ Session recovery uses `$XDG_DATA_HOME/rust-graph/session.rustgraph` (normally `~
 
 ## Scope and numerical limits
 
-This is a practical first release, not full Desmos feature parity. It does not implement symbolic algebra, general list algebra, statistics distributions, nonlinear regressions, actions, image overlays, audio tracing, or cloud collaboration. Rendering uses bounded numerical sampling; very small features, very rapid oscillations, and implicit tangencies may need zooming to resolve. Inequality fills follow a sampled mesh. Coordinate tracing interpolates sampled geometry. Graphs allow 128 rows; tables allow 2048 points. Expressions have length, depth and evaluation limits so malformed or recursive formulas return errors.
+This is an independent calculator with a bounded numerical engine. It does not implement symbolic algebra, general list algebra, statistics distributions, arbitrary user-specified regression models, actions, image overlays, audio tracing, or cloud collaboration. Rendering uses bounded numerical sampling; very small features, very rapid oscillations, and implicit tangencies may need zooming to resolve. Inequality fills follow a sampled mesh. Coordinate tracing interpolates sampled geometry. Graphs allow 128 rows; tables allow 2048 points. Expressions have length, depth and evaluation limits so malformed or recursive formulas return errors.
 
 ## Development
 
@@ -73,4 +75,4 @@ cargo test --locked
 - `src/app.rs`: egui desktop UI, history, dialogs and session recovery.
 - `src/export.rs`: SVG and PNG generation from shared geometry.
 
-MIT licensed. Not affiliated with Desmos Studio.
+MIT licensed. The bundled STIX Two Math font is licensed under the SIL Open Font License; see [assets/STIX-OFL.txt](assets/STIX-OFL.txt). Not affiliated with Desmos Studio.
