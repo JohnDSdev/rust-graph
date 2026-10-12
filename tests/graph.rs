@@ -240,3 +240,32 @@ fn old_files_get_math_display_defaults_and_settings_round_trip() {
         true
     );
 }
+
+#[test]
+fn implicit_contours_refine_steep_and_scaled_equations() {
+    use rust_graph::math::{Env, Expr};
+    let heart = "(x^2+y^2-1)^3-x^2*y^3";
+    let expression = Expr::parse(heart).unwrap();
+    let g = doc(&[&format!("{heart}=0")])
+        .compile()
+        .geometry(Viewport::default(), 600, 400);
+    let mut env = Env::default();
+    assert!(g.lines.len() > 20);
+    for (_, line) in &g.lines {
+        for &[x, y] in line {
+            env.vars.insert("x".into(), x);
+            env.vars.insert("y".into(), y);
+            assert!(
+                expression.eval(&env).unwrap().abs() < 1e-5,
+                "unrefined contour at {x},{y}"
+            );
+        }
+    }
+    let normal = doc(&["x^2+y^2=1"])
+        .compile()
+        .geometry(Viewport::default(), 600, 400);
+    let small = doc(&["1e-30*(x^2+y^2-1)=0"])
+        .compile()
+        .geometry(Viewport::default(), 600, 400);
+    assert_eq!(normal.lines.len(), small.lines.len());
+}

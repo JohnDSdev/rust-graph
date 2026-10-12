@@ -350,20 +350,49 @@ fn implicit(
                 if let (Some(a), Some(b)) = (z[k], z[n])
                     && ((a < 0.0) != (b < 0.0) || a == 0.0)
                 {
-                    let denominator = a - b;
-                    if denominator.abs() < 1e-20 {
+                    let mut lo = 0.0;
+                    let mut hi = 1.0;
+                    let mut left = a;
+                    let mut point = p[k];
+                    let mut valid = true;
+                    // Refine a bracketed crossing in coordinate space. Absolute
+                    // coefficient thresholds would erase scaled equations.
+                    for _ in 0..24 {
+                        let t = if a == 0.0 {
+                            0.0
+                        } else if b == 0.0 {
+                            1.0
+                        } else {
+                            (lo + hi) * 0.5
+                        };
+                        point = [
+                            p[k][0] + t * (p[n][0] - p[k][0]),
+                            p[k][1] + t * (p[n][1] - p[k][1]),
+                        ];
+                        env.vars.insert("x".into(), point[0]);
+                        env.vars.insert("y".into(), point[1]);
+                        let Ok(value) = e.eval(env) else {
+                            valid = false;
+                            break;
+                        };
+                        if value == 0.0 || a == 0.0 || b == 0.0 {
+                            break;
+                        }
+                        if (value < 0.0) == (left < 0.0) {
+                            lo = t;
+                            left = value;
+                        } else {
+                            hi = t;
+                        }
+                    }
+                    if !valid {
                         continue;
                     }
-                    let t = (a / denominator).clamp(0.0, 1.0);
-                    let point = [
-                        p[k][0] + t * (p[n][0] - p[k][0]),
-                        p[k][1] + t * (p[n][1] - p[k][1]),
-                    ];
                     // A sign change through an asymptote is not a contour.
                     env.vars.insert("x".into(), point[0]);
                     env.vars.insert("y".into(), point[1]);
                     if e.eval(env)
-                        .is_ok_and(|value| value.abs() <= 0.2 * (a.abs() + b.abs()).max(1e-10))
+                        .is_ok_and(|value| value.abs() <= 0.2 * (a.abs() + b.abs()))
                     {
                         crossings.push(point);
                     }
